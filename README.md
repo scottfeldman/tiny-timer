@@ -7,21 +7,7 @@ TinyGo firmware for [Arduino Nano RP2040 Connect](https://docs.arduino.cc/hardwa
 Patch `OnHours` and flash in one step:
 
 ```bash
-chmod +x flash.sh   # once
-./flash.sh 12
-```
-
-This rewrites the `const OnHours` line in `main.go`, then runs `GOWORK=off tinygo flash -target=nano-rp2040`.
-
-Build (disable `go.work` if your environment errors on workspace modules):
-
-```bash
-GOWORK=off tinygo build -target=nano-rp2040 -o tiny-timer.uf2 .
-```
-
-Flash (double-tap reset for UF2 boot if needed):
-
-```bash
-GOWORK=off tinygo flash -target=nano-rp2040 .
+./flash.sh 18
+OK: flashed OnHours=18 (D2 high 18h, low 6h per 24h cycle)
 ```
 
