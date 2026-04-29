@@ -13,11 +13,15 @@ const logPrefix = "[tiny-timer] "
 // Build-time strings via -ldflags -X (e.g. -X 'main.onHours=4' …). Do not initialize
 // these here or -X is ignored; see
 // https://tinygo.org/docs/guides/tips-n-tricks/#how-to-set-build-time-variables
-// When still empty at runtime, readConfig uses 12, 100, 0.
+// When still empty at runtime, readConfig uses 12, 100, 0, 0. onHours may be fractional
+// (e.g. 12.5 → 12h30m on-window; off-window is the rest of 24h).
+// onWindowReduceMins: after each full on+off cycle, subtract this from the next on-window;
+// when the on-window reaches zero, halt with relay off.
 var (
-	onHours        string
-	dutyPercent    string
-	dutyPeriodMins string
+	onHours            string
+	dutyPercent        string
+	dutyPeriodMins     string
+	onWindowReduceMins string
 )
 
 // Internal tick for duty mode (100ms) — balance timing resolution vs. CPU wakeups.
@@ -34,7 +38,7 @@ func main() {
 	led.Configure(machine.PinConfig{Mode: machine.PinOutput})
 	led.Set(false)
 
-	oh, dp, dperiod, ok := readConfig()
+	on, reduce, dp, dperiod, ok := readConfig()
 	if !ok {
 		logLine("invalid config; halting")
 		for {
@@ -46,20 +50,33 @@ func main() {
 	if dperiod > 0 {
 		perLog = int(dperiod / time.Minute)
 	}
-	logLine("start onHours=" + strconv.Itoa(oh) + "h offHours=" + strconv.Itoa(24-oh) +
-		"h duty%=" + strconv.Itoa(dp) + " periodMins=" + strconv.Itoa(perLog))
-
-	on := time.Duration(oh) * time.Hour
-	off := 24*time.Hour - on
+	startOff := 24*time.Hour - on
+	redLog := "0"
+	if reduce > 0 {
+		redLog = durFmt(reduce)
+	}
+	logLine("start on-window=" + durFmt(on) + " off-window=" + durFmt(startOff) +
+		" duty%=" + strconv.Itoa(dp) + " periodMins=" + strconv.Itoa(perLog) +
+		" onReducePerCycle=" + redLog)
 
 	fullOn := dperiod <= 0 || dp >= 100
 
+	curOn := on
 	for {
-		logLine("on-window start (" + durHours(on) + ")")
+		if curOn <= 0 {
+			logLine("on-window exhausted; relay OFF (halt)")
+			relay.Set(false)
+			led.Set(false)
+			for {
+			}
+		}
+
+		off := 24*time.Hour - curOn
+		logLine("on-window start (" + durFmt(curOn) + ")")
 		if fullOn {
 			logLine("relay ON (holds for full on-window)")
 			relay.Set(true)
-			for s := 0; s < int(on/time.Second); s++ {
+			for s := 0; s < int(curOn/time.Second); s++ {
 				led.Set(true)
 				time.Sleep(flashOn)
 				led.Set(false)
@@ -90,7 +107,7 @@ func main() {
 			if onSteps > periodSteps {
 				onSteps = periodSteps
 			}
-			totalSteps := int((on + dutyTick - 1) / dutyTick)
+			totalSteps := int((curOn + dutyTick - 1) / dutyTick)
 			var lastRel bool
 			for n := 0; n < totalSteps; n++ {
 				posInPeriod := n % periodSteps
@@ -108,16 +125,23 @@ func main() {
 				time.Sleep(dutyTick)
 			}
 		}
-		logLine("on-window end; relay OFF, off-window start (" + durHours(off) + ")")
+		logLine("on-window end; relay OFF, off-window start (" + durFmt(off) + ")")
 		relay.Set(false)
 		led.Set(false)
 		time.Sleep(off)
 		logLine("off-window end")
+		if reduce > 0 {
+			curOn -= reduce
+			if curOn < 0 {
+				curOn = 0
+			}
+			logLine("after reduce " + durFmt(reduce) + ", next on-window=" + durFmt(curOn))
+		}
 	}
 }
 
-func readConfig() (onH, dPct int, dPer time.Duration, ok bool) {
-	ohs, dps, pms := onHours, dutyPercent, dutyPeriodMins
+func readConfig() (on time.Duration, reduce time.Duration, dPct int, dPer time.Duration, ok bool) {
+	ohs, dps, pms, rms := onHours, dutyPercent, dutyPeriodMins, onWindowReduceMins
 	if ohs == "" {
 		ohs = "12"
 	}
@@ -127,10 +151,20 @@ func readConfig() (onH, dPct int, dPer time.Duration, ok bool) {
 	if pms == "" {
 		pms = "0"
 	}
-	oh, err := strconv.Atoi(ohs)
-	if err != nil || oh < 1 || oh > 23 {
+	if rms == "" {
+		rms = "0"
+	}
+	rm, err := strconv.Atoi(rms)
+	if err != nil || rm < 0 {
 		return
 	}
+	reduce = time.Duration(rm) * time.Minute
+
+	ohf, err := strconv.ParseFloat(ohs, 64)
+	if err != nil || ohf <= 0 || ohf >= 24 {
+		return
+	}
+	on = time.Duration(ohf * float64(time.Hour))
 	dP, err := strconv.Atoi(dps)
 	if err != nil || dP < 1 || dP > 100 {
 		return
@@ -140,20 +174,36 @@ func readConfig() (onH, dPct int, dPer time.Duration, ok bool) {
 		return
 	}
 	if dP == 100 {
-		return oh, 100, 0, true
+		return on, reduce, 100, 0, true
 	}
 	if mins < 1 {
 		return
 	}
 	period := time.Duration(mins) * time.Minute
-	return oh, dP, period, true
+	return on, reduce, dP, period, true
 }
 
 func logLine(msg string) {
 	println(logPrefix + msg)
 }
 
-func durHours(d time.Duration) string {
-	// on/off windows are always a whole number of hours in this app
-	return strconv.FormatInt(int64(d/time.Hour), 10) + "h"
+func durFmt(d time.Duration) string {
+	h := d / time.Hour
+	r := d % time.Hour
+	m := r / time.Minute
+	s := (r % time.Minute) / time.Second
+	out := ""
+	if h > 0 {
+		out += strconv.FormatInt(int64(h), 10) + "h"
+	}
+	if m > 0 || (h > 0 && s > 0) {
+		out += strconv.FormatInt(int64(m), 10) + "m"
+	}
+	if s > 0 {
+		out += strconv.FormatInt(int64(s), 10) + "s"
+	}
+	if out == "" {
+		return "0s"
+	}
+	return out
 }
