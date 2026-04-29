@@ -4,4 +4,4 @@ package main
 
 import "machine"
 
-func boardRelayPin() machine.Pin { return machine.GP2 }
+func boardRelayPin() machine.Pin { return machine.GP16 }
